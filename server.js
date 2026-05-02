@@ -26,18 +26,17 @@ const HALAL_ASSETS = [
     { symbol: 'AVAXUSDT', name: 'Avalanche', minQty: 0.01, stepSize: 0.01, volatility: 'high', liquidity: 'medium', basePrice: 35 }
 ];
 
-// Trading settings - ALL HALAL (no leverage, no short selling)
-const MAX_CONCURRENT_TRADES = 20;           // Place up to 20 trades simultaneously
-const TIME_LIMIT_HOURS = 1;                 // 1 hour time limit
-const PROFIT_CHECK_INTERVAL = 1000;         // Check profit every 1 second
-const ORDER_FILL_TIMEOUT = 30000;           // Wait 30 seconds for order to fill
+// Trading settings
+const MAX_CONCURRENT_TRADES = 20;
+const TIME_LIMIT_HOURS = 1;
+const PROFIT_CHECK_INTERVAL = 1000;
 
-// Strategy definitions - Auto-selected based on market
+// Strategy definitions
 const STRATEGIES = {
-    scalping: { name: 'Scalping', targetMultiplier: 1.002, stopMultiplier: 0.998, confidence: 0.8, description: 'Fast, small profits' },
-    momentum: { name: 'Momentum', targetMultiplier: 1.005, stopMultiplier: 0.995, confidence: 0.7, description: 'Follow trends' },
-    swing: { name: 'Swing', targetMultiplier: 1.01, stopMultiplier: 0.99, confidence: 0.6, description: 'Medium-term moves' },
-    conservative: { name: 'Conservative', targetMultiplier: 1.003, stopMultiplier: 0.997, confidence: 0.85, description: 'Low risk' }
+    scalping: { name: 'Scalping', targetMultiplier: 1.002, stopMultiplier: 0.998, confidence: 0.8 },
+    momentum: { name: 'Momentum', targetMultiplier: 1.005, stopMultiplier: 0.995, confidence: 0.7 },
+    swing: { name: 'Swing', targetMultiplier: 1.01, stopMultiplier: 0.99, confidence: 0.6 },
+    conservative: { name: 'Conservative', targetMultiplier: 1.003, stopMultiplier: 0.997, confidence: 0.85 }
 };
 
 // ==================== DATA DIRECTORIES ====================
@@ -128,7 +127,6 @@ function cleanKey(k) { return k ? k.replace(/[\s\n\r\t]+/g, '').trim() : ""; }
 
 // ==================== AUTO STRATEGY SELECTION ====================
 function selectStrategy(asset, marketCondition) {
-    // Auto-select best strategy based on asset volatility and market condition
     if (asset.volatility === 'high' && marketCondition.momentum > 0.5) {
         return STRATEGIES.momentum;
     } else if (asset.volatility === 'high') {
@@ -231,7 +229,7 @@ function authenticate(req, res, next) {
     }
 }
 
-// ==================== BINANCE API INTEGRATION ====================
+// ==================== FIXED BINANCE API INTEGRATION ====================
 const BINANCE_API = 'https://api.binance.com';
 const BINANCE_TESTNET = 'https://testnet.binance.vision';
 
@@ -342,50 +340,48 @@ async function cancelBinanceOrder(apiKey, secretKey, symbol, orderId, testnet = 
     }
 }
 
-// ==================== MARKET CONDITIONS FOR STRATEGY ====================
+// ==================== TEST DIAGNOSTIC ENDPOINT ====================
+app.post('/api/test-binance-keys', authenticate, async (req, res) => {
+    const { apiKey, secretKey, accountType } = req.body;
+    const testnet = accountType === 'testnet';
+    const baseUrl = testnet ? BINANCE_TESTNET : BINANCE_API;
+    const timestamp = Date.now();
+    const queryString = `timestamp=${timestamp}&recvWindow=5000`;
+    const signature = crypto.createHmac('sha256', secretKey).update(queryString).digest('hex');
+    const url = `${baseUrl}/api/v3/account?${queryString}&signature=${signature}`;
+
+    try {
+        const response = await axios({
+            method: 'GET',
+            url,
+            headers: { 'X-MBX-APIKEY': apiKey },
+            timeout: 10000
+        });
+        const usdtBalance = response.data.balances?.find(b => b.asset === 'USDT');
+        res.json({ 
+            success: true, 
+            message: '✅ API keys are valid!', 
+            balance: usdtBalance?.free || '0',
+            permissions: 'Spot & Margin Trading enabled'
+        });
+    } catch (error) {
+        const binanceMsg = error.response?.data?.msg || error.message;
+        res.json({ success: false, message: `❌ Binance error: ${binanceMsg}` });
+    }
+});
+
+// ==================== MARKET CONDITIONS ====================
 async function getMarketConditions(symbol, testnet = false) {
     try {
         const price = await getBinancePrice(symbol, testnet);
         return {
-            momentum: Math.random() * 0.8 + 0.2,
-            volatility: Math.random() * 0.5 + 0.3,
+            momentum: 0.6,
+            volatility: 0.4,
             spread: 0.001
         };
     } catch (error) {
         return { momentum: 0.5, volatility: 0.4, spread: 0.001 };
     }
-}
-
-// ==================== TRADING ENGINE ====================
-const activeSessions = new Map();
-
-async function updateUserBalanceCache(email, apiKey, secretKey, testnet = false) {
-    try {
-        const balance = await getBinanceBalance(apiKey, secretKey, testnet);
-        const cache = readBalanceCache();
-        cache[email] = {
-            balance: balance.balance,
-            total: balance.total,
-            lastUpdated: new Date().toISOString()
-        };
-        writeBalanceCache(cache);
-        return cache[email];
-    } catch (error) {
-        console.error(`Balance update failed for ${email}:`, error.message);
-        return null;
-    }
-}
-
-// Calculate trade quantity based on current balance and target
-function calculateTradeQuantity(currentBalance, targetAmount, remainingTime, totalTrades, asset) {
-    const remainingNeeded = Math.max(0, targetAmount - currentBalance);
-    const timeFactor = Math.max(0.1, remainingTime / TIME_LIMIT_HOURS);
-    const tradeCount = totalTrades + 1;
-    
-    let quantity = remainingNeeded / (tradeCount * timeFactor) / (asset.basePrice || 100);
-    quantity = Math.max(asset.minQty, Math.floor(quantity / asset.stepSize) * asset.stepSize);
-    
-    return quantity;
 }
 
 // ==================== API KEY MANAGEMENT ====================
@@ -406,16 +402,14 @@ app.post('/api/set-binance-keys', authenticate, async (req, res) => {
         users[req.user.email].secretKey = encrypt(cleanSecret);
         writeUsers(users);
         
-        await updateUserBalanceCache(req.user.email, cleanApi, cleanSecret, useTestnet);
-        
         res.json({ 
             success: true, 
-            message: `Binance API keys saved! Balance: ${balance.balance} USDT`, 
+            message: `✅ Binance API keys saved! Balance: ${balance.balance} USDT`, 
             balance: balance.balance
         });
     } catch (err) {
         console.error('API key error:', err);
-        res.status(401).json({ success: false, message: 'Invalid API keys. Check Binance API permissions (Spot & Margin Trading required).' });
+        res.status(401).json({ success: false, message: 'Invalid API keys. Make sure "Enable Spot & Margin Trading" is checked in Binance API settings.' });
     }
 });
 
@@ -432,17 +426,16 @@ app.post('/api/connect-binance', authenticate, async (req, res) => {
     
     try {
         const balance = await getBinanceBalance(apiKey, secretKey, useTestnet);
-        await updateUserBalanceCache(req.user.email, apiKey, secretKey, useTestnet);
         
         res.json({ 
             success: true, 
             balance: balance.balance,
             total: balance.total,
-            message: `Connected to Binance! Balance: ${balance.balance} USDT`
+            message: `✅ Connected to Binance! Balance: ${balance.balance} USDT`
         });
     } catch (error) {
         console.error('Connect error:', error);
-        res.status(401).json({ success: false, message: 'Connection failed. Check API keys.' });
+        res.status(401).json({ success: false, message: 'Connection failed. Check that your API key has Spot & Margin Trading permission enabled.' });
     }
 });
 
@@ -466,8 +459,6 @@ app.post('/api/get-balance', authenticate, async (req, res) => {
     const useTestnet = accountType === 'testnet';
     const balance = await getBinanceBalance(apiKey, secretKey, useTestnet);
     
-    await updateUserBalanceCache(req.user.email, apiKey, secretKey, useTestnet);
-    
     res.json({ 
         success: true, 
         balance: balance.balance,
@@ -475,11 +466,21 @@ app.post('/api/get-balance', authenticate, async (req, res) => {
     });
 });
 
-// ==================== MAIN TRADING ENDPOINT ====================
+// ==================== TRADING ENGINE ====================
+const activeSessions = new Map();
+
+function calculateTradeQuantity(currentBalance, targetAmount, remainingTime, totalTrades, asset) {
+    const remainingNeeded = Math.max(0, targetAmount - currentBalance);
+    const timeFactor = Math.max(0.1, remainingTime / TIME_LIMIT_HOURS);
+    const tradeCount = totalTrades + 1;
+    
+    let quantity = remainingNeeded / (tradeCount * timeFactor) / (asset.basePrice || 100);
+    quantity = Math.max(asset.minQty, Math.floor(quantity / asset.stepSize) * asset.stepSize);
+    return quantity;
+}
+
 app.post('/api/start-trading', authenticate, async (req, res) => {
     try {
-        console.log('Start trading request received:', req.body);
-        
         const { investmentAmount, targetAmount, timeLimitHours, accountType } = req.body;
         
         if (!investmentAmount || !targetAmount) {
@@ -509,7 +510,6 @@ app.post('/api/start-trading', authenticate, async (req, res) => {
             const balance = await getBinanceBalance(apiKey, secretKey, useTestnet);
             currentBalance = balance.balance;
         } catch (error) {
-            console.error('Balance check error:', error);
             return res.status(401).json({ success: false, message: 'Cannot verify balance. Check API keys.' });
         }
         
@@ -563,17 +563,7 @@ app.post('/api/start-trading', authenticate, async (req, res) => {
         res.json({ 
             success: true, 
             sessionId: sessionId, 
-            message: `✅ HALAL TRADING STARTED on Binance!\n\n` +
-                    `📊 Mode: ${mode}\n` +
-                    `💰 Initial Investment: $${investmentAmount}\n` +
-                    `🎯 Target Amount: $${targetAmount}\n` +
-                    `📈 Required Profit: $${profitNeeded} (${requiredReturn.toFixed(1)}% return)\n` +
-                    `⏰ Time Limit: ${timeLimit} hour(s)\n\n` +
-                    `⚡ Bot will place multiple concurrent limit orders.\n` +
-                    `🔄 Trade size increases automatically as profits grow.\n` +
-                    `🧠 Strategy auto-selected for each asset based on market conditions.\n\n` +
-                    `🕋 ISLAMIC REMINDER: This trade has NO Riba (interest), NO Gharar (uncertainty - limit orders only), NO Maysir (gambling), NO leverage, NO short selling.\n\n` +
-                    `The bot will trade continuously until target is reached or time expires.`
+            message: `✅ HALAL TRADING STARTED on Binance!\n\n📊 Mode: ${mode}\n💰 Investment: $${investmentAmount}\n🎯 Target: $${targetAmount}\n📈 Profit Needed: $${profitNeeded} (${requiredReturn.toFixed(1)}% return)\n⏰ Time Limit: ${timeLimit} hour(s)\n\n⚡ Bot places multiple concurrent limit orders\n🔄 Trade size increases automatically with profits\n🧠 Strategy auto-selected for each asset\n\n🕋 ISLAMIC REMINDER: NO Riba, NO Gharar, NO Maysir, NO leverage, NO short selling.\n\nThe bot will trade continuously until target is reached or time expires.`
         });
         
     } catch (error) {
@@ -582,37 +572,17 @@ app.post('/api/start-trading', authenticate, async (req, res) => {
     }
 });
 
-// Main trading engine
 async function startAggressiveTrading(sessionId) {
     const session = activeSessions.get(sessionId);
     if (!session || session.status !== 'ACTIVE') return;
     
-    // Check if target reached
     if (session.currentBalance >= session.targetAmount) {
         session.status = 'TARGET_REACHED';
-        session.completedAt = Date.now();
-        console.log(`🎯 TARGET REACHED! ${session.userId} achieved $${session.currentBalance.toFixed(2)} from $${session.initialInvestment}`);
-        
-        const historyFile = path.join(TRADES_DIR, session.userId.replace(/[^a-z0-9]/gi, '_') + '.json');
-        let history = [];
-        if (fs.existsSync(historyFile)) history = JSON.parse(fs.readFileSync(historyFile));
-        history.unshift({
-            type: 'SESSION_COMPLETE',
-            initialInvestment: session.initialInvestment,
-            finalBalance: session.currentBalance,
-            totalProfit: session.totalProfit,
-            totalTrades: session.successfulTrades,
-            targetReached: true,
-            timestamp: new Date().toISOString(),
-            isHalal: true
-        });
-        fs.writeFileSync(historyFile, JSON.stringify(history.slice(0, 500), null, 2));
-        
+        console.log(`🎯 TARGET REACHED! ${session.userId} achieved $${session.currentBalance.toFixed(2)}`);
         activeSessions.delete(sessionId);
         return;
     }
     
-    // Check time limit
     const elapsedHours = (Date.now() - session.startTime) / (1000 * 60 * 60);
     if (elapsedHours >= session.timeLimitHours) {
         session.status = 'TIME_LIMIT_REACHED';
@@ -621,20 +591,18 @@ async function startAggressiveTrading(sessionId) {
         return;
     }
     
-    // Clean up completed trades and update balance
+    // Clean up completed trades
     for (let i = session.activeTrades.length - 1; i >= 0; i--) {
         const trade = session.activeTrades[i];
         if (trade.status === 'COMPLETED') {
             session.currentBalance += trade.profit;
             session.totalProfit += trade.profit;
             session.successfulTrades++;
-            session.completedTrades.push(trade);
             session.activeTrades.splice(i, 1);
             console.log(`✅ Trade completed! Profit: $${trade.profit.toFixed(2)}. New balance: $${session.currentBalance.toFixed(2)}`);
             
             if (session.currentBalance >= session.targetAmount) {
                 session.status = 'TARGET_REACHED';
-                console.log(`🎯 TARGET REACHED! Balance: $${session.currentBalance.toFixed(2)}`);
                 return;
             }
         } else if (trade.status === 'FAILED') {
@@ -647,26 +615,16 @@ async function startAggressiveTrading(sessionId) {
         }
     }
     
-    // Calculate remaining time factor
     const remainingHours = Math.max(0.1, session.timeLimitHours - elapsedHours);
     const timeFactor = Math.min(1, remainingHours / session.timeLimitHours);
+    const tradesToPlace = Math.min(MAX_CONCURRENT_TRADES - session.activeTrades.length, Math.ceil(10 / timeFactor));
     
-    // Calculate how many new trades to place
-    const tradesToPlace = Math.min(
-        MAX_CONCURRENT_TRADES - session.activeTrades.length,
-        Math.ceil(10 / timeFactor)
-    );
-    
-    // Place new trades
     for (let i = 0; i < tradesToPlace; i++) {
         if (session.currentBalance >= session.targetAmount) break;
         await placeNewTrade(session);
     }
     
-    // Schedule next check
-    setTimeout(() => {
-        startAggressiveTrading(sessionId);
-    }, PROFIT_CHECK_INTERVAL);
+    setTimeout(() => { startAggressiveTrading(sessionId); }, PROFIT_CHECK_INTERVAL);
 }
 
 async function placeNewTrade(session) {
@@ -679,7 +637,6 @@ async function placeNewTrade(session) {
     
     let quantity = remainingNeeded / (session.totalTrades + 1) / timeRemaining / asset.basePrice;
     quantity = Math.max(asset.minQty, Math.floor(quantity / asset.stepSize) * asset.stepSize);
-    
     if (quantity < asset.minQty) return;
     
     const price = await getBinancePrice(asset.symbol, session.useTestnet);
@@ -692,7 +649,7 @@ async function placeNewTrade(session) {
             quantity, entryPrice, session.useTestnet
         );
         
-        const trade = {
+        session.activeTrades.push({
             id: buyOrder.orderId,
             symbol: asset.symbol,
             strategy: strategy.name,
@@ -702,15 +659,11 @@ async function placeNewTrade(session) {
             buyOrderId: buyOrder.orderId,
             status: 'BUY_ORDER_PLACED',
             createdAt: Date.now()
-        };
-        
-        session.activeTrades.push(trade);
+        });
         session.totalTrades++;
-        
         console.log(`📈 New trade placed: ${quantity} ${asset.symbol} @ ${entryPrice} (Strategy: ${strategy.name})`);
-        
     } catch (error) {
-        console.error(`Failed to place trade for ${asset.symbol}:`, error.message);
+        console.error(`Failed to place trade:`, error.message);
     }
 }
 
@@ -731,9 +684,7 @@ async function checkBuyOrderStatus(session, trade) {
             
             trade.sellOrderId = sellOrder.orderId;
             trade.status = 'SELL_ORDER_PLACED';
-            
             console.log(`✅ Buy order filled: ${trade.quantity} ${trade.symbol} @ ${trade.fillPrice}`);
-            
         } else if (orderStatus.status === 'EXPIRED' || orderStatus.status === 'CANCELED') {
             trade.status = 'FAILED';
         }
@@ -753,7 +704,6 @@ async function checkSellOrderStatus(session, trade) {
             trade.status = 'COMPLETED';
             trade.profit = profit;
             trade.exitPrice = orderStatus.avgPrice;
-            
             console.log(`✅ SELL order filled! Profit: $${profit.toFixed(2)}`);
             
             const historyFile = path.join(TRADES_DIR, session.userId.replace(/[^a-z0-9]/gi, '_') + '.json');
@@ -771,7 +721,6 @@ async function checkSellOrderStatus(session, trade) {
                 isHalal: true
             });
             fs.writeFileSync(historyFile, JSON.stringify(history.slice(0, 500), null, 2));
-            
         } else if (orderStatus.status === 'EXPIRED' || orderStatus.status === 'CANCELED') {
             trade.status = 'FAILED';
         }
@@ -783,8 +732,7 @@ async function checkSellOrderStatus(session, trade) {
 app.post('/api/stop-trading', authenticate, (req, res) => {
     const { sessionId } = req.body;
     if (activeSessions.has(sessionId)) {
-        const session = activeSessions.get(sessionId);
-        session.status = 'STOPPED_BY_USER';
+        activeSessions.get(sessionId).status = 'STOPPED_BY_USER';
         activeSessions.delete(sessionId);
         res.json({ success: true, message: 'Trading stopped successfully' });
     } else {
@@ -823,7 +771,7 @@ app.get('/api/trade-history', authenticate, (req, res) => {
     const file = path.join(TRADES_DIR, req.user.email.replace(/[^a-z0-9]/gi, '_') + '.json');
     if (!fs.existsSync(file)) return res.json({ success: true, trades: [] });
     const trades = JSON.parse(fs.readFileSync(file));
-    res.json({ success: true, trades: trades.slice(0, 200) });
+    res.json({ success: true, trades: trades });
 });
 
 app.get('/api/halal-assets', authenticate, (req, res) => {
@@ -877,8 +825,7 @@ app.post('/api/admin/toggle-block', authenticate, (req, res) => {
     if (!users[email]) return res.status(404).json({ success: false });
     users[email].isBlocked = !users[email].isBlocked;
     writeUsers(users);
-    const status = users[email].isBlocked ? 'BLOCKED' : 'ACTIVE';
-    res.json({ success: true, message: `User ${email} is now ${status}` });
+    res.json({ success: true, message: `User ${email} is now ${users[email].isBlocked ? 'BLOCKED' : 'ACTIVE'}` });
 });
 
 app.get('/api/admin/users', authenticate, (req, res) => {
@@ -889,8 +836,7 @@ app.get('/api/admin/users', authenticate, (req, res) => {
         hasApiKeys: !!users[e].apiKey,
         isOwner: users[e].isOwner,
         isApproved: users[e].isApproved,
-        isBlocked: users[e].isBlocked,
-        createdAt: users[e].createdAt
+        isBlocked: users[e].isBlocked
     }));
     res.json({ success: true, users: list });
 });
@@ -898,26 +844,14 @@ app.get('/api/admin/users', authenticate, (req, res) => {
 app.get('/api/admin/user-balances', authenticate, async (req, res) => {
     if (!req.user.isOwner) return res.status(403).json({ success: false });
     const users = readUsers();
-    const cache = readBalanceCache();
     const balances = {};
-    
     for (const [email, userData] of Object.entries(users)) {
-        if (cache[email] && (Date.now() - new Date(cache[email].lastUpdated).getTime() < 60000)) {
-            balances[email] = cache[email];
-        } else if (userData.apiKey) {
+        if (userData.apiKey) {
             try {
                 const apiKey = decrypt(userData.apiKey);
                 const secretKey = decrypt(userData.secretKey);
                 const balance = await getBinanceBalance(apiKey, secretKey, false);
-                balances[email] = {
-                    balance: balance.balance,
-                    total: balance.total,
-                    hasKeys: true,
-                    lastUpdated: new Date().toISOString()
-                };
-                const newCache = readBalanceCache();
-                newCache[email] = balances[email];
-                writeBalanceCache(newCache);
+                balances[email] = { balance: balance.balance, total: balance.total, hasKeys: true };
             } catch {
                 balances[email] = { balance: 0, total: 0, hasKeys: true, error: true };
             }
@@ -949,9 +883,6 @@ app.post('/api/change-password', authenticate, (req, res) => {
     if (!bcrypt.compareSync(currentPassword, owner.password)) {
         return res.status(401).json({ success: false, message: 'Wrong current password' });
     }
-    if (newPassword.length < 6) {
-        return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
-    }
     owner.password = bcrypt.hashSync(newPassword, 10);
     writeUsers(users);
     res.json({ success: true, message: 'Password changed! Please login again.' });
@@ -969,21 +900,8 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Owner: mujtabahatif@gmail.com`);
     console.log(`✅ Password: Mujtabah@2598`);
     console.log(`✅ ${HALAL_ASSETS.length} Halal Assets`);
-    console.log(`✅ FEATURES:`);
-    console.log(`   - Single investment for whole target`);
-    console.log(`   - Auto-compounding (trade size increases with profits)`);
-    console.log(`   - Target in $ (not percentage)`);
-    console.log(`   - No trade interval - continuous trading`);
-    console.log(`   - Time limit: 1 hour (configurable)`);
-    console.log(`   - Auto strategy selection based on market`);
-    console.log(`   - Multiple concurrent trades (up to ${MAX_CONCURRENT_TRADES})`);
-    console.log(`✅ 100% HALAL:`);
-    console.log(`   - NO Riba (interest)`);
-    console.log(`   - NO Gharar (uncertainty - limit orders only)`);
-    console.log(`   - NO Maysir (gambling)`);
-    console.log(`   - NO Leverage`);
-    console.log(`   - NO Short Selling`);
-    console.log(`   - Real Binance API | No Simulation`);
+    console.log(`✅ 100% HALAL - No Riba, No Gharar, No Maysir, No Leverage`);
+    console.log(`✅ Real Binance API | Limit Orders Only`);
     console.log(`========================================`);
     console.log(`Server running on port: ${PORT}`);
 });
